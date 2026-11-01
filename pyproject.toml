@@ -1,0 +1,34 @@
+[project]
+name = "cull"
+version = "0.1.0"
+description = "Clean, Unify, Lint, Load: High-speed tabular and document ETL auditing workbench"
+readme = "README.md"
+requires-python = ">=3.15"
+license = { text = "MIT" }
+dependencies = [
+    "litestar[pydantic,valkey]>=2.25.0",
+    "litestar-granian>=0.16.0",
+    "granian[reload]>=2.8.4",
+    "asyncpg>=0.32.0",
+    "valkey[libvalkey]>=6.2.0",
+    "pydantic>=2.14.0",
+    "pydantic-settings>=2.16.2",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.13.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py315"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

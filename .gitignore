@@ -1,0 +1,42 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Python / uv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Rust / Cargo / Maturin
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Next.js / Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Local data & uploads
+.cull_data/
+uploads/
+*.csv
+*.jsonl
+*.parquet
+!tests/fixtures/*
+
+# IDEs
+.idea/
+.zed/
+.vscode/
+*.swp
