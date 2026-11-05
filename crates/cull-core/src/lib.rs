@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -32,9 +32,19 @@ pub struct FileAuditReport {
 #[pymethods]
 impl FileAuditReport {
     pub fn to_json(&self) -> PyResult<String> {
-        serde_json::to_string_pretty(self)
+        serde_json::to_string(self)
             .map_err(|e| PyIOError::new_err(format!("Serialization error: {e}")))
     }
+}
+
+#[pyclass(get_all)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RowPreview {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub offset: usize,
+    pub limit: usize,
+    pub total_rows: usize,
 }
 
 #[derive(Default)]
@@ -65,15 +75,18 @@ impl ColumnAccumulator {
         }
     }
 
+    fn is_null_token(trimmed: &str) -> bool {
+        trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("null")
+            || trimmed.eq_ignore_ascii_case("na")
+            || trimmed.eq_ignore_ascii_case("nan")
+    }
+
     fn observe(&mut self, raw: &str) {
         self.total_count += 1;
         let trimmed = raw.trim();
 
-        if trimmed.is_empty()
-            || trimmed.eq_ignore_ascii_case("null")
-            || trimmed.eq_ignore_ascii_case("na")
-            || trimmed.eq_ignore_ascii_case("nan")
-        {
+        if Self::is_null_token(trimmed) {
             self.null_count += 1;
             return;
         }
@@ -195,8 +208,7 @@ pub fn audit_jsonl_file(path: &str) -> PyResult<FileAuditReport> {
     let reader = BufReader::new(file);
 
     let mut accumulators: Vec<ColumnAccumulator> = Vec::new();
-    let mut column_index: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut column_index: HashMap<String, usize> = HashMap::new();
     let mut row_count = 0usize;
     let mut duplicate_row_count = 0usize;
     let mut seen_lines: HashSet<String> = HashSet::new();
@@ -241,7 +253,6 @@ pub fn audit_jsonl_file(path: &str) -> PyResult<FileAuditReport> {
                 accumulators[idx].observe(&str_val);
             }
 
-            // Record missing keys in this JSON object as nulls
             for (k, &idx) in &column_index {
                 if !obj.contains_key(k) {
                     accumulators[idx].observe("");
@@ -265,11 +276,186 @@ pub fn audit_jsonl_file(path: &str) -> PyResult<FileAuditReport> {
     })
 }
 
+/// Streams a paginated slice of rows from a CSV or JSONL file for the workbench data grid.
+#[pyfunction]
+#[pyo3(signature = (path, offset=0, limit=100))]
+pub fn preview_rows(path: &str, offset: usize, limit: usize) -> PyResult<RowPreview> {
+    if path.ends_with(".jsonl") || path.ends_with(".ndjson") {
+        let file = File::open(path)
+            .map_err(|e| PyIOError::new_err(format!("Failed to open JSONL '{path}': {e}")))?;
+        let reader = BufReader::new(file);
+
+        let mut headers: Vec<String> = Vec::new();
+        let mut header_map: HashMap<String, usize> = HashMap::new();
+        let mut raw_objs: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+        let mut total_rows = 0usize;
+
+        for line_res in reader.lines() {
+            let line = line_res.map_err(|e| PyIOError::new_err(format!("Read error: {e}")))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(trimmed) {
+                for k in obj.keys() {
+                    if !header_map.contains_key(k) {
+                        header_map.insert(k.clone(), headers.len());
+                        headers.push(k.clone());
+                    }
+                }
+                if total_rows >= offset && raw_objs.len() < limit {
+                    raw_objs.push(obj);
+                }
+                total_rows += 1;
+            }
+        }
+
+        let rows: Vec<Vec<String>> = raw_objs
+            .into_iter()
+            .map(|obj| {
+                headers
+                    .iter()
+                    .map(|h| match obj.get(h) {
+                        None | Some(serde_json::Value::Null) => String::new(),
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(other) => other.to_string(),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Ok(RowPreview {
+            headers,
+            rows,
+            offset,
+            limit,
+            total_rows,
+        })
+    } else {
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_path(path)
+            .map_err(|e| PyIOError::new_err(format!("Failed to open CSV '{path}': {e}")))?;
+
+        let headers: Vec<String> = reader
+            .headers()
+            .map_err(|e| PyIOError::new_err(format!("Failed to read headers: {e}")))?
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut total_rows = 0usize;
+
+        for record_res in reader.records() {
+            let record = record_res.map_err(|e| PyIOError::new_err(format!("Row error: {e}")))?;
+            if total_rows >= offset && rows.len() < limit {
+                rows.push(record.iter().map(ToString::to_string).collect());
+            }
+            total_rows += 1;
+        }
+
+        Ok(RowPreview {
+            headers,
+            rows,
+            offset,
+            limit,
+            total_rows,
+        })
+    }
+}
+
+/// Applies column dropping, renaming, exact deduplication, and non-null row filtering,
+/// writing the cleaned output to `output_path` and returning the retained row count.
+#[pyfunction]
+#[pyo3(signature = (input_path, output_path, drop_columns=Vec::new(), rename_map=HashMap::new(), deduplicate=false, drop_null_columns=Vec::new()))]
+pub fn clean_and_export_csv(
+    input_path: &str,
+    output_path: &str,
+    drop_columns: Vec<String>,
+    rename_map: HashMap<String, String>,
+    deduplicate: bool,
+    drop_null_columns: Vec<String>,
+) -> PyResult<usize> {
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_path(input_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to open input CSV: {e}")))?;
+
+    let mut writer = csv::Writer::from_path(output_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to create output CSV: {e}")))?;
+
+    let headers = reader
+        .headers()
+        .map_err(|e| PyIOError::new_err(format!("Failed to read CSV headers: {e}")))?
+        .clone();
+
+    let drop_set: HashSet<String> = drop_columns.into_iter().collect();
+    let non_null_set: HashSet<String> = drop_null_columns.into_iter().collect();
+
+    let mut kept_indices: Vec<usize> = Vec::new();
+    let mut output_headers: Vec<String> = Vec::new();
+    let mut required_indices: Vec<usize> = Vec::new();
+
+    for (idx, h) in headers.iter().enumerate() {
+        if non_null_set.contains(h) {
+            required_indices.push(idx);
+        }
+        if !drop_set.contains(h) {
+            kept_indices.push(idx);
+            let final_name = rename_map.get(h).cloned().unwrap_or_else(|| h.to_string());
+            output_headers.push(final_name);
+        }
+    }
+
+    writer
+        .write_record(&output_headers)
+        .map_err(|e| PyIOError::new_err(format!("Failed to write CSV headers: {e}")))?;
+
+    let mut seen_rows: HashSet<Vec<String>> = HashSet::new();
+    let mut written_rows = 0usize;
+
+    for result in reader.records() {
+        let record = result.map_err(|e| PyIOError::new_err(format!("Malformed CSV row: {e}")))?;
+
+        let has_null_in_required = required_indices.iter().any(|&req_idx| {
+            let val = record.get(req_idx).unwrap_or("").trim();
+            ColumnAccumulator::is_null_token(val)
+        });
+        if has_null_in_required {
+            continue;
+        }
+
+        let projected_row: Vec<String> = kept_indices
+            .iter()
+            .map(|&idx| record.get(idx).unwrap_or("").trim().to_string())
+            .collect();
+
+        if deduplicate && !seen_rows.insert(projected_row.clone()) {
+            continue;
+        }
+
+        writer
+            .write_record(&projected_row)
+            .map_err(|e| PyIOError::new_err(format!("Failed to write row: {e}")))?;
+        written_rows += 1;
+    }
+
+    writer
+        .flush()
+        .map_err(|e| PyIOError::new_err(format!("Failed to flush output CSV: {e}")))?;
+
+    Ok(written_rows)
+}
+
 #[pymodule]
 fn cull_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ColumnStats>()?;
     m.add_class::<FileAuditReport>()?;
+    m.add_class::<RowPreview>()?;
     m.add_function(wrap_pyfunction!(audit_csv_file, m)?)?;
     m.add_function(wrap_pyfunction!(audit_jsonl_file, m)?)?;
+    m.add_function(wrap_pyfunction!(preview_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(clean_and_export_csv, m)?)?;
     Ok(())
 }
