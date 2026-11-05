@@ -14,6 +14,14 @@ setup:
 build-core:
     uv run maturin develop --release --manifest-path crates/cull-core/Cargo.toml
 
+# Start PostgreSQL and Valkey containers in the background
+up:
+    docker compose up -d
+
+# Stop local infrastructure containers
+down:
+    docker compose down
+
 # Run Clippy and Ruff linters across the workspace
 lint:
     cargo clippy --manifest-path crates/cull-core/Cargo.toml --all-targets -- -D warnings
@@ -31,6 +39,6 @@ test:
     cargo test --manifest-path crates/cull-core/Cargo.toml
     uv run pytest
 
-# Start the Litestar API server via Granian
+# Start the Litestar API server via litestar-granian
 serve-api:
-    uv run granian --interface asgi backend.cull_api.app:app --host ${CULL_HOST:-127.0.0.1} --port ${CULL_PORT:-8000} --reload
+    uv run litestar --app backend.cull_api.app:app run --host ${CULL_HOST:-127.0.0.1} --port ${CULL_PORT:-8000} --reload
