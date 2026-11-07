@@ -103,11 +103,7 @@ class WorkbenchStore:
                 )
                 if row:
                     raw_payload = row["report_payload"]
-                    data = (
-                        json.loads(raw_payload)
-                        if isinstance(raw_payload, str)
-                        else raw_payload
-                    )
+                    data = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
                     return AuditReportRecord.model_validate(data)
 
         return self._memory_fallback.get(job_id)
