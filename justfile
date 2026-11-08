@@ -42,3 +42,11 @@ test:
 # Start the Litestar API server via litestar-granian
 serve-api:
     uv run litestar --app backend.cull_api.app:app run --host ${CULL_HOST:-127.0.0.1} --port ${CULL_PORT:-8000} --reload
+
+# Install Next.js frontend dependencies
+setup-web:
+    cd frontend && npm install
+
+# Start the Next.js development server on port 3000
+serve-web:
+    cd frontend && npm run dev
