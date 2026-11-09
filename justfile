@@ -8,7 +8,6 @@ default:
 # Sync Python environment and build the Rust PyO3 extension in development mode
 setup:
     uv sync
-    uv run maturin develop --manifest-path crates/cull-core/Cargo.toml
 
 # Rebuild only the Rust native module (release-optimized for file benchmarking)
 build-core:

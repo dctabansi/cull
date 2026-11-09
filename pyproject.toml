@@ -28,6 +28,11 @@ dev = [
     "ruff>=0.17.4",
 ]
 
+[tool.maturin]
+module-name = "cull_core"
+manifest-path = "crates/cull-core/Cargo.toml"
+features = ["pyo3/extension-module"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py315"
@@ -38,6 +43,3 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-
-[tool.maturin]
-features = ["pyo3/extension-module"]
